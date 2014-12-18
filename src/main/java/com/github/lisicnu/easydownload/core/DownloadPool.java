@@ -10,14 +10,23 @@ import com.github.lisicnu.easydownload.feeds.DownloadingFeed;
 import com.github.lisicnu.easydownload.feeds.TaskFeed;
 import com.github.lisicnu.easydownload.listeners.IDownloadListener;
 import com.github.lisicnu.easydownload.protocol.IDownloadProtocol;
-import com.github.lisicnu.log4android.LogManager;
 import com.github.lisicnu.libDroid.util.FileUtils;
 import com.github.lisicnu.libDroid.util.MiscUtils;
 import com.github.lisicnu.libDroid.util.StringUtils;
 import com.github.lisicnu.libDroid.util.URLUtils;
+import com.github.lisicnu.log4android.LogManager;
+
+import org.apache.http.Header;
+import org.apache.http.HttpResponse;
+import org.apache.http.HttpStatus;
+import org.apache.http.client.HttpClient;
+import org.apache.http.client.methods.HttpHead;
+import org.apache.http.impl.client.DefaultHttpClient;
+import org.apache.http.params.BasicHttpParams;
+import org.apache.http.params.HttpConnectionParams;
+import org.apache.http.params.HttpParams;
 
 import java.io.File;
-import java.net.HttpURLConnection;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -1139,6 +1148,11 @@ public class DownloadPool {
                 }
 
                 if (taskQueue.isEmpty()) {
+                    try {
+                        Thread.sleep(100);
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }
                     if (isUseSmartDownload())
                         resumeCacheItems(0);
 
@@ -1148,14 +1162,11 @@ public class DownloadPool {
 
 //                            LogManager.d(TAG, "taskQueue empty,start await .... " + taskQueue
 // .size());
-                            try {
 //                                if (isAutoResumeItems())
 //                                    taskQueueEmptyCondition.await(10, TimeUnit.SECONDS);
-                                taskQueueEmptyCondition.await();
-                            } catch (InterruptedException e) {
-                                e.printStackTrace();
-                            }
-
+                            taskQueueEmptyCondition.await();
+                        } catch (InterruptedException e) {
+                            e.printStackTrace();
                         } finally {
                             taskQueueLocker.unlock();
 //                            LogManager.d(TAG, "taskQueue not empty,exit await. " + taskQueue.size
@@ -1176,6 +1187,7 @@ public class DownloadPool {
             log("download task checker has been finished. ", true);
         }
     }
+
 
     /**
      * TODO use multi-thread to download file, default one task use 3 thread to
@@ -1243,7 +1255,7 @@ public class DownloadPool {
             if (entity == null)
                 return;
 
-            this.writeToDB = entity.isWriteToDb();
+            writeToDB = entity.isWriteToDb();
             setDbFeed(new DbFeed());
             getDbFeed().setDownloadUrl(entity.getDownloadUrl());
             getDbFeed().setDeleteExistFile(entity.isDeleteExistFile());
@@ -1267,7 +1279,10 @@ public class DownloadPool {
          * 繼續之前為下載完成的任務.
          */
         DownloadTask(DbFeed item) {
+            if (item == null) return;
+
             setDbFeed(item);
+            fileSize = item.getFileSize();
             downloadedInSec = 0;
         }
 
@@ -1284,20 +1299,78 @@ public class DownloadPool {
         }
 
         private void analysisDownloadable() {
-            if (getDbFeed().getServers() == null || getDbFeed().getServers().isEmpty()) {
-                downloadUrlRight = URLUtils.canConnect(downURL);
+            downloadUrlRight = false;
+
+            if (getDbFeed().getServers() == null || getDbFeed().getServers().isEmpty() || URLUtil
+                    .isNetworkUrl(downURL)) {
+                downloadUrlRight = checkUrl(downURL);
             } else {
-                // TODO 后续需加上两个的地址进行判断... 比如 两个都带前缀的....
                 int m = getDbFeed().getServers().size();
                 for (int i = 0; i < m; i++) {
                     String str = getDbFeed().getServers().get(i).concat(getDbFeed().getDownloadUrl());
-                    if (URLUtils.canConnect(str)) {
-                        downloadUrlRight = true;
-                        downURL = str;
+
+                    downloadUrlRight = checkUrl(str);
+                    if (downloadUrlRight) {
                         break;
                     }
                 }
             }
+        }
+
+        HttpClient client = null;
+
+        void initHttpClient() {
+            if (client != null) return;
+
+            HttpParams httpParameters = new BasicHttpParams();
+            HttpConnectionParams.setConnectionTimeout(httpParameters, 10000);
+            HttpConnectionParams.setSoTimeout(httpParameters, 30000);
+            client = new DefaultHttpClient(httpParameters);
+        }
+
+        boolean checkUrl(String url) {
+            boolean result = false;
+
+            HttpHead httpHead = null;
+
+            try {
+                initHttpClient();
+                httpHead = new HttpHead(url);
+                HttpResponse httpResp = client.execute(httpHead);
+                // 判断是够请求成功
+                int statusCode = httpResp.getStatusLine().getStatusCode();
+                if (statusCode == HttpStatus.SC_OK) {
+                    // 获取返回的数据
+                    if (getFileSize() == -1) {
+                        Header[] headers = httpResp.getHeaders("Content-Length");
+                        if (headers.length > 0) {
+                            fileSize = Long.valueOf(headers[0].getValue());
+                        } else {
+                            fileSize = IO_SINGLE_READ_2_END;
+                        }
+
+                        if (refId != DBAccess.INVALIDVALUE) {
+                            getDBHelper().updateDbFileSize(refId, getFileSize() == IO_SINGLE_READ_2_END ? 0 :
+                                    getFileSize());
+                        }
+                    }
+
+                    downURL = url;
+                    result = true;
+                }
+
+            } catch (Exception e) {
+                e.printStackTrace();
+            } finally {
+                if (httpHead != null) {
+                    httpHead.abort();
+                }
+                if (client != null) {
+                    client.getConnectionManager().shutdown();
+                    client = null;
+                }
+            }
+            return result;
         }
 
         /**
@@ -1521,19 +1594,10 @@ public class DownloadPool {
                     return;
                 }
 
-                // TODO 文件大小 小于0 说明是第一次开始下载...
-                if (getFileSize() == -1) {
-                    findFileSize();
-                    if (refId != DBAccess.INVALIDVALUE)
-                        getDBHelper().updateDbFileSize(refId, getFileSize() == IO_SINGLE_READ_2_END ? 0 :
-                                getFileSize());
-                }
                 if (getFileSize() == -1) {
                     removeTask(this);
                     onMessage(getDbFeed(), IDownloadListener.MSG_CODE_GET_FILE_SIZE_FAILD,
                             "获取文件大小失败了");
-
-                    log("task fileSize is 0: " + getDbFeed().getDownloadUrl(), true);
 
                     onTaskStateChanged(getDbFeed(), DBAccess.STATUS_DOWNLOAD_ERROR_HTTP);
                     return;
@@ -1543,8 +1607,9 @@ public class DownloadPool {
 
                 // 獲取當前文件的下載記錄.
                 items = getDBHelper().findItems(getDbFeed().getDownloadUrl());
-                if (stop)
+                if (stop) {
                     return;
+                }
 
                 // TODO 此处应该检测磁盘的剩余空间大小， 再继续下载的情况下，
                 // 此处应该检测文件是否存在，如果数据库存在下载记录但是文件不存在，则删除数据库的记录，強制重新開始下載
@@ -1604,14 +1669,29 @@ public class DownloadPool {
             }
         }
 
-        void onTaskProgress() {
-            int download = 0;
-            for (DownloadingFeed item : items) {
-                if (item != null)
-                    download += (item.getCurPos() - item.getStartPos() + 1);
-            }
+        long lastProgressTime = 0;
 
-            onProgress(getDbFeed(), download, getFileSize());
+        void onTaskProgress() {
+
+//            if (SystemClock.elapsedRealtime() - lastProgressTime < updateTime) {
+//                return;
+//            }
+
+            MiscUtils.getExecutor().execute(new Runnable() {
+                @Override
+                public void run() {
+                    int download = 0;
+                    synchronized (this) {
+                        download = 0;
+                        for (DownloadingFeed item : items) {
+                            if (item != null)
+                                download += (item.getCurPos() - item.getStartPos() + 1);
+                        }
+                    }
+                    lastProgressTime = SystemClock.elapsedRealtime();
+                    onProgress(getDbFeed(), download, getFileSize());
+                }
+            });
         }
 
         /**
@@ -1703,30 +1783,6 @@ public class DownloadPool {
                 }
             }
             return tt;
-        }
-
-        private void findFileSize() {
-            if (!URLUtil.isNetworkUrl(downURL)) {
-                log("findFileSize not invalid network URL.", false);
-                onTaskStateChanged(getDbFeed(), DBAccess.STATUS_DOWNLOAD_ERROR_PROTOCOL_NOT_FOUND);
-                return;
-            }
-
-            try {
-                HttpURLConnection conn = URLUtils.getNormalCon(downURL);
-                conn.connect();
-                if (conn.getResponseCode() == 200) {
-                    fileSize = conn.getContentLength();
-                    if (getFileSize() == -1) {
-                        fileSize = IO_SINGLE_READ_2_END;
-                    }
-                }
-                conn.disconnect();
-            } catch (Exception e) {
-                LogManager.e(TAG, e);
-            }
-
-//            log("FileSize:" + fileSize + " tmpFileName:" + tmpFileName, false);
         }
 
         private DownloadingFeed getItemById(final int curId) {

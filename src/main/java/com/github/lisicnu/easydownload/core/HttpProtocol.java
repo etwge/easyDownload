@@ -5,12 +5,18 @@ import android.os.SystemClock;
 import com.github.lisicnu.easydownload.feeds.DownloadingFeed;
 import com.github.lisicnu.easydownload.protocol.IDownloadProtocol;
 import com.github.lisicnu.log4android.LogManager;
-import com.github.lisicnu.libDroid.util.URLUtils;
+
+import org.apache.http.HttpResponse;
+import org.apache.http.client.HttpClient;
+import org.apache.http.client.methods.HttpGet;
+import org.apache.http.impl.client.DefaultHttpClient;
+import org.apache.http.params.BasicHttpParams;
+import org.apache.http.params.HttpConnectionParams;
+import org.apache.http.params.HttpParams;
 
 import java.io.File;
 import java.io.InputStream;
 import java.io.RandomAccessFile;
-import java.net.HttpURLConnection;
 
 /**
  * <p/>
@@ -54,22 +60,22 @@ public class HttpProtocol implements IDownloadProtocol {
     @Override
     public int download() {
         int code = DBAccess.STATUS_DOWNLOAD_SUCCESS;
-        HttpURLConnection http = null;
         InputStream inStream = null;
         RandomAccessFile rndFile = null;
         long curPos = item.getCurPos();
-        try {
-            http = URLUtils.getNormalCon(task.downURL);
-            // http.setRequestProperty("Keep-Alive", "300");
-            http.setRequestProperty("Connection", "Keep-Alive");
-            if (item.getEndPos() <= 0) {
-                http.setRequestProperty("Range", "bytes=" + curPos + "-");
-            } else {
-                http.setRequestProperty("Range", "bytes=" + curPos + "-" + item.getEndPos());
-            }
-            http.connect();
+        HttpGet httpGet = null;
+        HttpClient client = null;
 
-            inStream = http.getInputStream();
+        try {
+            HttpParams httpParameters = new BasicHttpParams();
+            HttpConnectionParams.setConnectionTimeout(httpParameters, 10000);
+            HttpConnectionParams.setSoTimeout(httpParameters, 30000);
+            client = new DefaultHttpClient(httpParameters);
+            httpGet = new HttpGet(task.downURL);
+            httpGet.addHeader("Range", "bytes=" + curPos + "-" + item.getEndPos());
+
+            HttpResponse response = client.execute(httpGet);
+            inStream = response.getEntity().getContent();
 
             byte[] buffer = new byte[BUFFER_SIZE];
             int readLen = 0;
@@ -132,6 +138,9 @@ public class HttpProtocol implements IDownloadProtocol {
             LogManager.e(TAG, getClass().getName() + ":" + e.toString());
             code = DBAccess.STATUS_DOWNLOAD_ERROR_UNKNOW;
         } finally {
+            if (httpGet != null) {
+                httpGet.abort();
+            }
             if (inStream != null) {
                 try {
                     inStream.close();
@@ -140,9 +149,9 @@ public class HttpProtocol implements IDownloadProtocol {
                 }
                 inStream = null;
             }
-            if (http != null) {
-                http.disconnect();
-                http = null;
+            if (client != null) {
+                client.getConnectionManager().shutdown();
+                client = null;
             }
             if (rndFile != null) {
                 try {
@@ -152,7 +161,6 @@ public class HttpProtocol implements IDownloadProtocol {
                 }
                 rndFile = null;
             }
-
             item.setCurPos(curPos);
         }
         return code;
