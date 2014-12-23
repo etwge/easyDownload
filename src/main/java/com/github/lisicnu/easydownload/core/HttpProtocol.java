@@ -112,7 +112,7 @@ public class HttpProtocol implements IDownloadProtocol {
                 item.setCurPos(curPos);
 
                 if (System.currentTimeMillis() - tmpLastUpdateTime > DownloadPool.getInstance
-                        ().getUpdateDBTime()) {
+                        ().getUpdateTime()) {
 
                     task.onTaskSaveProgress(item.getId(), curPos);
                     task.onTaskProgress();

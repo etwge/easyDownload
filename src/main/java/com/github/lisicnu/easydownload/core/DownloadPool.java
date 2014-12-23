@@ -166,16 +166,16 @@ public class DownloadPool {
         setDBHelper(DBAccess.getInstance().setDBHelper(new DBSqliteHelper(context)));
     }
 
-    public long getUpdateDBTime() {
+    public long getUpdateTime() {
         return updateTime;
     }
 
     /**
-     * set download update db time. default is {@link #DEFAULTUPDATETIME}.
+     * set download update time. default is {@link #DEFAULTUPDATETIME}.
      *
      * @param timeSpec
      */
-    public DownloadPool setUpdateDBTime(int timeSpec) {
+    public DownloadPool setUpdateTime(int timeSpec) {
         if (timeSpec > 100)
             updateTime = timeSpec;
         else {
@@ -220,12 +220,7 @@ public class DownloadPool {
             this.autoResumeItems = autoResume;
         }
 
-        try {
-            taskQueueLocker.lock();
-            taskQueueEmptyCondition.signal();
-        } finally {
-            taskQueueLocker.unlock();
-        }
+        notifyTaskQueue();
 
         return this;
     }
@@ -351,7 +346,7 @@ public class DownloadPool {
         if (StringUtils.isNullOrEmpty(url))
             return;
 
-        BaseFeed feed = removeTaskFromQueueAndList(url, false);
+        BaseFeed feed = removeFromPool(url, false);
         onTaskStateChanged(feed, DBAccess.STATUS_DOWNLOAD_PAUSED);
 
         if (feed != null) {
@@ -364,7 +359,7 @@ public class DownloadPool {
      *
      * @param url
      */
-    public synchronized void resume(String url) {
+    public void resume(String url) {
         if (StringUtils.isNullOrEmpty(url))
             return;
 
@@ -525,7 +520,7 @@ public class DownloadPool {
     /**
      * 繼續之前未完成的下載.
      */
-    public synchronized void resumeUnFinishedDownload() {
+    public void resumeUnFinishedDownload() {
         int limit = isUseSmartDownload() ? MAX_CACHE_ITEMS : 0;
 
         List<String> argList = new ArrayList<String>();
@@ -533,8 +528,7 @@ public class DownloadPool {
         argList.add(String.valueOf(DBAccess.STATUS_DOWNLOAD_PAUSED));
 
         StringBuffer buffer = new StringBuffer();
-        buffer.append(DBSqliteHelper.COL_STATUS);
-        buffer.append(" not in (?,?");
+        buffer.append(DBSqliteHelper.COL_STATUS).append(" not in (?,?");
         if (isUseSmartDownload()) {
             buffer.append(",?");
             argList.add(String.valueOf(DBAccess.STATUS_NOTSTART));
@@ -612,18 +606,20 @@ public class DownloadPool {
         synchronized (locker) {
             if (!writeToDb || (!isUseSmartDownload() || taskQueue.size() + tasks.size() < MAX_CACHE_ITEMS)) {
                 taskQueue.add(task);
-
-                try {
-                    taskQueueLocker.lock();
-//                    LogUtils.d(TAG, "item added.. call signal..");
-                    taskQueueEmptyCondition.signal();
-                } finally {
-                    taskQueueLocker.unlock();
-                }
+                notifyTaskQueue();
             }
         }
 
         // log("item added: " + task.dbFeed.getDownloadUrl(), false);
+    }
+
+    void notifyTaskQueue() {
+        try {
+            taskQueueLocker.lock();
+            taskQueueEmptyCondition.signal();
+        } finally {
+            taskQueueLocker.unlock();
+        }
     }
 
     /**
@@ -638,7 +634,7 @@ public class DownloadPool {
 
         log("deleteTask: " + downloadUrl, false);
 
-        BaseFeed feed = removeTaskFromQueueAndList(downloadUrl, true);
+        BaseFeed feed = removeFromPool(downloadUrl, true);
 
         if (feed == null) {
             feed = getDBHelper().findTask(downloadUrl);
@@ -646,8 +642,8 @@ public class DownloadPool {
 
         // 确保临时文件被删除
         if (feed != null) {
-            String tmp = getTmpFileName(feed.getFileName());
-            FileUtils.delete(new File(feed.getSaveDir(), tmp).getAbsolutePath());
+            FileUtils.delete(new File(feed.getSaveDir(), getTmpFileName(feed.getFileName()))
+                    .getAbsolutePath());
         }
 
         getDBHelper().deleteTask(downloadUrl);
@@ -678,23 +674,21 @@ public class DownloadPool {
         if (StringUtils.isNullOrEmpty(downloadUrl))
             return null;
 
-        synchronized (locker) {
-            BaseFeed feed = null;
+        BaseFeed feed = null;
 
-            for (Iterator<DownloadTask> ite = taskQueue.iterator(); ite.hasNext(); ) {
-                DownloadTask tmp = ite.next();
-                if (tmp != null && tmp.getDbFeed().getDownloadUrl().equalsIgnoreCase(downloadUrl)) {
-                    feed = tmp.getDbFeed();
+        for (Iterator<DownloadTask> ite = taskQueue.iterator(); ite.hasNext(); ) {
+            DownloadTask tmp = ite.next();
+            if (tmp != null && tmp.getDbFeed().getDownloadUrl().equalsIgnoreCase(downloadUrl)) {
+                feed = tmp.getDbFeed();
 
-                    ite.remove();
-                    if (deleteTmpFile) {
-                        tmp.deleteTmpFile();
-                    }
-                    break;
+                ite.remove();
+                if (deleteTmpFile) {
+                    tmp.deleteTmpFile();
                 }
+                break;
             }
-            return feed;
         }
+        return feed;
     }
 
     /**
@@ -708,8 +702,58 @@ public class DownloadPool {
         if (StringUtils.isNullOrEmpty(downloadUrl))
             return null;
 
+        BaseFeed feed = null;
+
+        int m = tasks.size();
+        for (int j = 0; j < m; j++) {
+            DownloadTask tmp;
+            try {
+                tmp = tasks.get(j);
+            } catch (Exception e) {
+                continue;
+            }
+
+            if (tmp != null && tmp.getDbFeed().getDownloadUrl().equalsIgnoreCase(downloadUrl)) {
+                feed = tmp.getDbFeed();
+                tmp.stopDownload();
+                if (deleteTmpFile) {
+                    tmp.deleteTmpFile();
+                }
+                tasks.remove(j);
+                break;
+            }
+        }
+        return feed;
+
+    }
+
+    /**
+     * @param downloadUrl
+     * @param deleteTmpFile
+     * @return
+     */
+    private BaseFeed removeFromPool(String downloadUrl, boolean deleteTmpFile) {
+
+        if (StringUtils.isNullOrEmpty(downloadUrl))
+            return null;
+
         synchronized (locker) {
             BaseFeed feed = null;
+
+            for (Iterator<DownloadTask> ite = taskQueue.iterator(); ite.hasNext(); ) {
+                DownloadTask tmp = ite.next();
+                if (tmp != null && tmp.getDbFeed().getDownloadUrl().equalsIgnoreCase(downloadUrl)) {
+                    feed = tmp.getDbFeed();
+
+                    ite.remove();
+                    if (deleteTmpFile) {
+                        tmp.deleteTmpFile();
+                    }
+
+                    return feed;
+                    //break;
+                }
+            }
 
             int m = tasks.size();
             for (int j = 0; j < m; j++) {
@@ -727,31 +771,12 @@ public class DownloadPool {
                         tmp.deleteTmpFile();
                     }
                     tasks.remove(j);
-                    break;
+                    return feed;
                 }
             }
-            return feed;
-        }
-    }
 
-    /**
-     * return the local file path.
-     *
-     * @param downloadUrl
-     * @param deleteTmpFile
-     * @return
-     */
-    private BaseFeed removeTaskFromQueueAndList(String downloadUrl, boolean deleteTmpFile) {
-
-        if (StringUtils.isNullOrEmpty(downloadUrl))
             return null;
-
-        BaseFeed feed = removeFromQueue(downloadUrl, deleteTmpFile);
-        if (feed == null) {
-            feed = removeFromList(downloadUrl, deleteTmpFile);
         }
-
-        return feed;
     }
 
     /**
@@ -901,13 +926,8 @@ public class DownloadPool {
         stopped = true;
         synchronized (locker) {
             taskQueue.clear();
-            try {
-                taskQueueLocker.lock();
 //                    LogUtils.d(TAG, "item added.. call signal..");
-                taskQueueEmptyCondition.signal();
-            } finally {
-                taskQueueLocker.unlock();
-            }
+            notifyTaskQueue();
 
             Iterator<DownloadTask> ite = tasks.iterator();
             while (ite.hasNext()) {
@@ -1148,34 +1168,23 @@ public class DownloadPool {
                 }
 
                 if (taskQueue.isEmpty()) {
-                    try {
-                        Thread.sleep(100);
-                    } catch (InterruptedException e) {
-                        e.printStackTrace();
-                    }
                     if (isUseSmartDownload())
                         resumeCacheItems(0);
 
                     if (taskQueue.isEmpty()) {
+//                          LogManager.d(TAG, "empty,start await .... " + taskQueue.size());
                         try {
                             taskQueueLocker.lock();
-
-//                            LogManager.d(TAG, "taskQueue empty,start await .... " + taskQueue
-// .size());
-//                                if (isAutoResumeItems())
-//                                    taskQueueEmptyCondition.await(10, TimeUnit.SECONDS);
                             taskQueueEmptyCondition.await();
                         } catch (InterruptedException e) {
                             e.printStackTrace();
                         } finally {
                             taskQueueLocker.unlock();
-//                            LogManager.d(TAG, "taskQueue not empty,exit await. " + taskQueue.size
-// ());
+//                            LogManager.d(TAG, "not empty,exit await. " + taskQueue.size());
                         }
+
 //                        try {
-////                            log("start sleeping 10s.....", true);
-//
-//                            Thread.sleep(10000);
+//                            Thread.sleep(100);
 //                        } catch (InterruptedException e) {
 //                            e.printStackTrace();
 //                        }
@@ -1396,7 +1405,10 @@ public class DownloadPool {
         private synchronized void onTaskFailed(BaseFeed feed, int reason) {
             if (feed == null) return;
             onTaskStateChanged(feed, reason);
-            removeTaskFromQueueAndList(feed.getDownloadUrl(), false);
+//            removeTask(this);
+            removeFromPool(feed.getDownloadUrl(), false);
+
+            notifyTaskQueue();
         }
 
         /**
@@ -1411,6 +1423,7 @@ public class DownloadPool {
 
                 if (allFinished) {
                     taskFinished();
+                    notifyTaskQueue();
                 }
             } else {
                 // TODO 没有存储空间的时候 直接退出， 其他失败原因就重试下载. 不能读写磁盘时也应该重试
@@ -1441,7 +1454,8 @@ public class DownloadPool {
         }
 
         private void taskFinished() {
-            removeTask(DownloadTask.this);
+//            removeTask(DownloadTask.this);
+            removeFromPool(getDbFeed().getDownloadUrl(), false);
 
             // TODO 对文件重新命名
             new File(getDbFeed().getSaveDir(), tmpFileName).renameTo(new File(getDbFeed().getSaveDir(),
@@ -1507,23 +1521,23 @@ public class DownloadPool {
         /**
          * 停止下载
          */
-        public synchronized void stopDownload() {
+        public void stopDownload() {
             stop = true;
             if (threads == null)
                 return;
 
-            for (int i = 0; i < threads.length; i++) {
-                if (threads[i] == null)
+            for (DownloadThread thread : threads) {
+                if (thread == null)
                     continue;
 
-                threads[i].stopDownload();
+                thread.stopDownload();
                 try {
-                    threads[i].join(1000);
+                    thread.join(1000);
                 } catch (InterruptedException e1) {
                     e1.printStackTrace();
                 }
 
-                log("end stopdownload:" + threads[i].item.getId(), false);
+                log("end stopdownload:" + thread.item.getId(), false);
             }
         }
 
@@ -1550,15 +1564,6 @@ public class DownloadPool {
                     tmp.onStateChanged(getDbFeed(), DBAccess.STATUS_DOWNLOAD_ANALYSIS_URL);
                 }
             }
-        }
-
-        /**
-         * 地址不能下载时就将自己给移除掉. 同时更改状态
-         */
-        private void onAnalysisURLFailed() {
-            onTaskStateChanged(getDbFeed(), DBAccess.STATUS_DOWNLOAD_ERROR_HTTP);
-            removeTask(this);
-//            log("onAnalysisURLFailed " + getDbFeed().getDownloadUrl(), false);
         }
 
         /**
@@ -1590,16 +1595,19 @@ public class DownloadPool {
                 // getDbFeed().getDownloadUrl() + "|download url: " + downURL, false);
 
                 if (!downloadUrlRight) {
-                    onAnalysisURLFailed();
+                    onTaskFailed(getDbFeed(), DBAccess.STATUS_DOWNLOAD_ERROR_HTTP);
+//                    onAnalysisURLFailed();
                     return;
                 }
 
                 if (getFileSize() == -1) {
-                    removeTask(this);
                     onMessage(getDbFeed(), IDownloadListener.MSG_CODE_GET_FILE_SIZE_FAILD,
                             "获取文件大小失败了");
 
-                    onTaskStateChanged(getDbFeed(), DBAccess.STATUS_DOWNLOAD_ERROR_HTTP);
+                    onTaskFailed(getDbFeed(), DBAccess.STATUS_DOWNLOAD_ERROR_HTTP);
+
+//                    removeTask(this);
+//                    onTaskStateChanged(getDbFeed(), DBAccess.STATUS_DOWNLOAD_ERROR_HTTP);
                     return;
                 }
 
@@ -1623,19 +1631,22 @@ public class DownloadPool {
                             lastNoSpace = SystemClock.elapsedRealtime();
                             onMessage(getDbFeed(), IDownloadListener.MSG_CODE_STORAGE_NOT_ENOUGH,
                                     "磁盘剩余空间不足");
-                            onTaskStateChanged(getDbFeed(), DBAccess.STATUS_DOWNLOAD_ERROR_NOSTORAGE);
+
+                            onTaskFailed(getDbFeed(), DBAccess.STATUS_DOWNLOAD_ERROR_NOSTORAGE);
+//                            onTaskStateChanged(getDbFeed(), DBAccess.STATUS_DOWNLOAD_ERROR_NOSTORAGE);
+//                            removeTask(this);
 
                             removedAllUnStartedTask();
 
-                            removeTask(this);
                             return;
                         } else if (val == FileUtils.CREATE_NEW_FILE_FAILED) {
                             onMessage(getDbFeed(), IDownloadListener.MSG_CODE_CREATE_FILE_FAILED,
                                     "文件创建失败");
 
-                            onTaskStateChanged(getDbFeed(), DBAccess.STATUS_DOWNLOAD_ERROR_WRITEFILE);
+                            onTaskFailed(getDbFeed(), DBAccess.STATUS_DOWNLOAD_ERROR_WRITEFILE);
 
-                            removeTask(this);
+//                            onTaskStateChanged(getDbFeed(), DBAccess.STATUS_DOWNLOAD_ERROR_WRITEFILE);
+//                            removeTask(this);
                             return;
                         }
                     }
@@ -1673,9 +1684,9 @@ public class DownloadPool {
 
         void onTaskProgress() {
 
-//            if (SystemClock.elapsedRealtime() - lastProgressTime < updateTime) {
-//                return;
-//            }
+            if (SystemClock.elapsedRealtime() - lastProgressTime < updateTime) {
+                return;
+            }
 
             MiscUtils.getExecutor().execute(new Runnable() {
                 @Override
