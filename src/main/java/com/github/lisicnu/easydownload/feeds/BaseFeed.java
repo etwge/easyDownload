@@ -23,8 +23,8 @@ public class BaseFeed {
     private String userData2 = "";
     private List<String> servers;
     private int priority;
-    private int maxRetryTimes = 30;
-    private int retryWaitMills = 3000;
+    private int maxRetryTimes = 10; // 单次下载的重试次数.
+    private int retryWaitMills = 3000; // 单次下载重试之间的等待时间.
     private int threadCount = 3;
     private int limitSpeed = 0;
     private int ignoreSize = 4194304;
@@ -146,6 +146,8 @@ public class BaseFeed {
         StringBuilder builder = new StringBuilder();
         if (items != null) {
             for (String string : items) {
+                if (StringUtils.isNullOrEmpty(string)) continue;
+
                 builder.append(string);
                 builder.append(SERVER_SEPARATOR);
             }
