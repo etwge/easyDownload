@@ -9,6 +9,15 @@ easyDownload
 使用前调用 DownloadPool.init(context); 进行初始化, 之后将可以开始下载.
 
 
+
+##gradle使用说明##
+
+compile 'com.github.lisicnu:easyDownload:0.1.2'
+// 内部已经自动引用  
+// compile 'com.github.lisicnu:droidUtil:0.1.3'
+// compile 'com.github.lisicnu:log4android:1.0.1'
+
+
 ##Future##
-目前此项目正在推送到maven 仓库的过程中, 所涉及到的项目 libDroid, log4android, 都正在推送的过程中.
+所涉及到的项目 libDroid, log4android, 
 具体的使用方式参见 http://www.cnblogs.com/checkway/, 相关文章正在完善中.
